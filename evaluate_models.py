@@ -1,6 +1,5 @@
 """
 EVALUATE_MODELS.PY - PHASE 6: test the tuned models once on the unseen test set
-==============================================================================
 Reads what train_and_tuning.py saved, so the (slow) tuning is never repeated.
 
 HOW TO RUN
@@ -8,14 +7,11 @@ HOW TO RUN
   2. Keep this file in the SAME folder, then: python evaluate_models.py
   Outputs (created next to this file):
        evaluation_results.csv            - test-set metrics and confusion-matrix counts
-       threshold_analysis_train.csv      - threshold table (from the TRAINING data only)
        confusion_matrices.png            - one confusion matrix per model
        precision_recall_curve.png        - precision-recall curve per model (test set)
        threshold_analysis.png            - recall / precision / F1 against the threshold
        top_predictors.png                - the factors the final model relies on most
        feature_importance_random_forest.csv - importance of all 40 factors
-       final_model_random_forest.joblib  - the final model (Random Forest) as one file
-       eval_log.txt                      - everything printed, kept as proof for the report
 
 SECTIONS
   Step 1: load models and data          Step 4: threshold analysis (training data)
@@ -29,26 +25,6 @@ import numpy as np
 import pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-
-
-# ---------------------------------------------------------------------------
-# Logging: everything printed also goes to eval_log.txt (traceability)
-# ---------------------------------------------------------------------------
-class Tee:
-    def __init__(self, *streams):
-        self.streams = streams
-
-    def write(self, text):
-        for s in self.streams:
-            s.write(text)
-
-    def flush(self):
-        for s in self.streams:
-            s.flush()
-
-
-log_file = open(os.path.join(HERE, "eval_log.txt"), "w", encoding="utf-8")
-sys.stdout = Tee(sys.__stdout__, log_file)
 
 
 def header(title):
@@ -75,9 +51,7 @@ except ImportError:
     print("NOTE: matplotlib is not installed, so the pictures will be skipped.")
     print("      Install it with:  python -m pip install matplotlib   (numbers are still produced)")
 
-# ===========================================================================
 # STEP 1: LOAD THE TUNED MODELS AND THE DATA
-# ===========================================================================
 print("\nStep 1: load the tuned models and the data")
 needed = ["best_models.joblib", "train_split.csv", "test_split.csv"]
 missing = [f for f in needed if not os.path.exists(os.path.join(HERE, f))]
@@ -104,9 +78,7 @@ print("    The test set has never been used for training or tuning. It is used o
 test_proba = {name: m.predict_proba(X_test)[:, 1] for name, m in models.items()}
 test_pred = {name: m.predict(X_test) for name, m in models.items()}
 
-# ===========================================================================
 # STEP 2: METRICS ON THE TEST SET (as on the slides)
-# ===========================================================================
 header("STEP 2: METRICS ON THE TEST SET (default decision rule)")
 print("Default rule: each model's own prediction (flag a patient when the model's probability")
 print("of early readmission is above 0.5; class weighting already makes 0.5 sensitive to the")
@@ -136,9 +108,7 @@ print(f"Random guessing would give Precision of about {y_test.mean():.3f} (the s
 results.to_csv(os.path.join(HERE, "evaluation_results.csv"), index=False)
 print("\nSaved: evaluation_results.csv")
 
-# ===========================================================================
 # STEP 3: CONFUSION MATRICES
-# ===========================================================================
 header("STEP 3: CONFUSION MATRICES (test set)")
 print("Rows = what really happened, columns = what the model predicted.")
 print("  TN = correctly said 'not readmitted early'   FP = false alarm (flagged, but was fine)")
@@ -174,20 +144,17 @@ if HAVE_PLOT:
     plt.close()
     print("\nSaved: confusion_matrices.png")
 
-# ===========================================================================
 # STEP 4: THRESHOLD ANALYSIS (uses the TRAINING data only)
 # WHY: a model flags a patient when its probability passes a threshold. Moving the
 # threshold trades false alarms against missed patients. To study this without
 # touching the test set, we use out-of-fold predictions: each training patient is
 # scored by a model that never saw them (same grouped 5-fold as Phase 5).
-# ===========================================================================
 header("STEP 4: THRESHOLD ANALYSIS (from the training data, not the test set)")
 print("Getting out-of-fold predictions for the training set (this takes a minute or two)...")
 cv = StratifiedGroupKFold(n_splits=5, shuffle=True, random_state=42)
 grid = np.round(np.arange(0.20, 0.801, 0.05), 2)
 fine = np.round(np.arange(0.05, 0.951, 0.01), 2)
 oof = {}
-thr_rows = []
 for name, m in models.items():
     oof[name] = cross_val_predict(clone(m), X_train, y_train, groups=groups_train, cv=cv,
                                   method="predict_proba", n_jobs=-1)[:, 1]
@@ -200,8 +167,6 @@ for name, m in models.items():
         prec = precision_score(y_train, pred, zero_division=0)
         f1 = f1_score(y_train, pred, zero_division=0)
         table.append((t, pred.mean(), rec, prec, f1))
-        thr_rows.append({"model": name, "threshold": t, "flagged_share": pred.mean(),
-                         "recall": rec, "precision": prec, "f1": f1})
         if f1 > best_f1:
             best_f1, best_t = f1, t
     print(f"\n{name}")
@@ -214,12 +179,10 @@ for name, m in models.items():
         else:
             print(f"    {t:>9.2f}{flagged * 100:>17.1f}%{rec:>9.3f}{prec:>11.3f}{f1:>8.3f}{note}")
 
-pd.DataFrame(thr_rows).to_csv(os.path.join(HERE, "threshold_analysis_train.csv"), index=False)
 print("\nHow to read this: lowering the threshold flags more patients, so Recall goes up and")
 print("Precision goes down (more false alarms). Raising it does the opposite. Which point to use")
 print("is a decision about how many false alarms the hospital can afford. No threshold has been")
 print("changed on the test set: the results in Steps 2 and 3 use the default rule only.")
-print("\nSaved: threshold_analysis_train.csv")
 
 if HAVE_PLOT:
     fig, axes = plt.subplots(1, 3, figsize=(15, 4.2), sharey=True)
@@ -238,12 +201,10 @@ if HAVE_PLOT:
     plt.close()
     print("Saved: threshold_analysis.png")
 
-# ===========================================================================
 # STEP 5: PRECISION-RECALL CURVE (test set)
 # WHY: shows, for every possible threshold, how much Precision must be given up to
 # gain Recall. It is drawn from the test set but nothing is chosen from it. No
 # PR-AUC number is reported (your decision): the curve is a picture only.
-# ===========================================================================
 header("STEP 5: PRECISION-RECALL CURVE (test set)")
 if HAVE_PLOT:
     plt.figure(figsize=(8, 6))
@@ -269,13 +230,11 @@ print("Reading it: a curve close to the dashed line means the model is only slig
 print("random guessing at that Recall level; the further above it, the better.")
 
 
-# ===========================================================================
 # STEP 6: WHICH FACTORS DOES THE FINAL MODEL RELY ON? (permutation importance)
 # The group chose the Random Forest as the final model.
 # METHOD: shuffle ONE factor at a time in the test set, so it carries no real
 # information, and measure how much the model's F1 falls. A big fall means the
 # model relies on that factor. Nothing is chosen from this: it only explains.
-# ===========================================================================
 header("STEP 6: TOP PREDICTORS OF THE FINAL MODEL (Random Forest)")
 from sklearn.inspection import permutation_importance
 
@@ -312,13 +271,9 @@ if HAVE_PLOT:
     plt.close()
     print("Saved: top_predictors.png")
 
-# ===========================================================================
 # STEP 7: THE FINAL MODEL IN USE
-# ===========================================================================
 header("STEP 7: THE FINAL MODEL IN USE")
-final_path = os.path.join(HERE, "final_model_random_forest.joblib")
-joblib.dump(rf_model, final_path)
-print(f"Saved the final model as one file: {final_path}")
+print("The final model is the tuned Random Forest, stored inside best_models.joblib.")
 print("It is a pipeline: raw patient record (40 fields) -> scale numbers and one-hot encode")
 print("categories -> Random Forest -> probability of early readmission -> flag if above 0.5.\n")
 print("Example: 5 patients picked at random from the test set (fixed seed 7, not hand-picked)")
@@ -328,11 +283,9 @@ print(f"    {'age':<10}{'main diagnosis':<17}{'prior inpatient':>16}{'risk':>8}{
 for (_, row), prob, actual in zip(sample.iterrows(), p5, y_test[sample.index]):
     print(f"    {row['age']:<10}{row['diag_1_category']:<17}{int(row['number_inpatient']):>16}"
           f"{prob:>8.2f}{'yes' if prob > 0.5 else 'no':>9}{'yes' if actual == 1 else 'no':>23}")
-print("\nTo use it later:  model = joblib.load('final_model_random_forest.joblib')")
+print("\nTo use it later:  model = joblib.load('best_models.joblib')['Random Forest']")
 print("                  model.predict_proba(new_patients)[:, 1]   (new_patients = same 40 columns)")
 print("It is a screening aid, not a diagnosis: about 4 in 5 flagged patients would not be")
 print("readmitted early.")
 
-header("DONE: phase 6 complete. Log saved to eval_log.txt")
-sys.stdout = sys.__stdout__  # stop copying to the log before closing it
-log_file.close()
+header("DONE: phase 6 complete")

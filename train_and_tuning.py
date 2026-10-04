@@ -10,8 +10,10 @@ HOW TO RUN
        train_split.csv        - Phase 4 training set (about 80% of patients)
        test_split.csv         - Phase 4 test set (about 20% of patients, never used for tuning)
        cv_results_phase5.csv  - every setting tried in Phase 5 with its cross-validation scores
+       cv_fold_scores_phase5.csv - F1, recall and precision of every setting on every validation fold
+       cv_folds_structure_phase5.png - picture of how the 5 folds are cut from the 80% training set
+       cv_f1_by_fold_phase5.png - F1 on each validation fold, one chart per model
        best_models.joblib     - the three tuned models (used by the evaluation phase)
-       train_log.txt          - everything printed, kept as proof for the report
 
 SECTIONS
   PHASE 4: Split into train and test (by patient, stratified)
@@ -24,26 +26,6 @@ import numpy as np
 import pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-
-
-# ---------------------------------------------------------------------------
-# Logging: everything printed also goes to train_log.txt (traceability)
-# ---------------------------------------------------------------------------
-class Tee:
-    def __init__(self, *streams):
-        self.streams = streams
-
-    def write(self, text):
-        for s in self.streams:
-            s.write(text)
-
-    def flush(self):
-        for s in self.streams:
-            s.flush()
-
-
-log_file = open(os.path.join(HERE, "train_log.txt"), "w", encoding="utf-8")
-sys.stdout = Tee(sys.__stdout__, log_file)
 
 
 def header(title):
@@ -207,27 +189,34 @@ scoring = {"f1": "f1", "recall": "recall", "precision": "precision"}
 models = {
     "Logistic Regression": (
         LogisticRegression(class_weight="balanced", max_iter=1000, random_state=42),
-        {"model__C": [0.01, 0.1, 1.0]},
-        "C = regularisation strength (smaller = simpler model). Three values a factor of 10 apart "
+        {"model__C": [0.1, 1.0]},
+        "C = regularisation strength (smaller = simpler model). Two values a factor of 10 apart "
         "show whether a simpler or a freer model works better.",
     ),
     "Decision Tree": (
-        DecisionTreeClassifier(class_weight="balanced", random_state=42),
-        {"model__max_depth": [4, 6, 8], "model__min_samples_leaf": [20, 50, 100]},
-        "max_depth limits how many questions the tree can ask (deep trees memorise the training data); "
-        "min_samples_leaf stops it making rules for tiny groups. Shallow depths also keep the tree "
-        "explainable to doctors, which is the reason it is on your slides.",
+        DecisionTreeClassifier(class_weight="balanced", min_samples_leaf=50, random_state=42),
+        {"model__max_depth": [6, 8]},
+        "max_depth limits how many questions the tree can ask (deep trees memorise the training data), "
+        "so it is the one setting tuned. Shallow depths also keep the tree explainable to doctors, "
+        "which is the reason it is on your slides. min_samples_leaf is FIXED at 50 (stops rules for "
+        "tiny groups); that value was the winner in the earlier full-grid run, which used "
+        "cross-validation on the training set only.",
     ),
     "Random Forest": (
-        RandomForestClassifier(class_weight="balanced", n_estimators=100, random_state=42, n_jobs=1),
-        {"model__max_depth": [8, 12], "model__min_samples_leaf": [20, 50]},
-        "100 trees is a standard size (more adds time, little gain). max_depth and min_samples_leaf "
-        "control overfitting in the same way as for the single tree.",
+        RandomForestClassifier(class_weight="balanced", n_estimators=100, min_samples_leaf=20,
+                               random_state=42, n_jobs=1),
+        {"model__max_depth": [8, 12]},
+        "100 trees is a standard size (more adds time, little gain). max_depth is the one setting "
+        "tuned, to control overfitting as for the single tree. min_samples_leaf is FIXED at 20; "
+        "that value was the winner in the earlier full-grid run, which used cross-validation on "
+        "the training set only.",
     ),
 }
 
 best_models = {}
 all_cv_rows = []
+fold_rows = []      # score of every setting on every fold (for Steps 6-7)
+chosen_labels = {}  # the chosen setting of each model
 for name, (clf, grid, reason) in models.items():
     n_combos = int(np.prod([len(v) for v in grid.values()]))
     print("\n" + "-" * 72)
@@ -250,7 +239,12 @@ for name, (clf, grid, reason) in models.items():
                             "mean_f1": r["mean_test_f1"], "std_f1": r["std_test_f1"],
                             "mean_recall": r["mean_test_recall"],
                             "mean_precision": r["mean_test_precision"]})
+        for i in range(5):  # the score on each of the 5 validation folds
+            fold_rows.append({"model": name, "settings": label, "fold": i + 1,
+                              "f1": r[f"split{i}_test_f1"], "recall": r[f"split{i}_test_recall"],
+                              "precision": r[f"split{i}_test_precision"]})
     best_label = ", ".join(f"{k.replace('model__', '')}={v}" for k, v in search.best_params_.items())
+    chosen_labels[name] = best_label
     print(f"    CHOSEN: {best_label}  (highest mean F1 = {search.best_score_:.3f})")
     print("    The chosen settings were then refitted on the whole training set.")
     best_models[name] = search.best_estimator_
@@ -260,6 +254,130 @@ joblib.dump(best_models, os.path.join(HERE, "best_models.joblib"))
 print("\nSaved: cv_results_phase5.csv (every setting tried) and best_models.joblib (the 3 tuned models)")
 print("The test set has still not been touched. It is used once, in the evaluation phase.")
 
-header("DONE: phases 4-5 complete. Log saved to train_log.txt")
-sys.stdout = sys.__stdout__  # stop copying to the log before closing it
-log_file.close()
+# ===========================================================================
+# STEP 6: HOW THE 5 CROSS-VALIDATION FOLDS WERE BUILT (actual sizes)
+# WHY: shows what "5-fold cross-validation on the 80% training set" means in
+# numbers. Each round holds one fold out for validation and trains on the other
+# four. Because the folds are cut from the 80% training set, each validation fold
+# is about 20% of 80% = 16% of ALL the data. The folds below are rebuilt with the
+# same settings and seed as the tuning above, so they are the same folds.
+# ===========================================================================
+header("STEP 6: HOW THE 5 CROSS-VALIDATION FOLDS WERE BUILT")
+
+try:
+    import matplotlib
+    matplotlib.use("Agg")  # save pictures to files; no window needed
+    import matplotlib.pyplot as plt
+    HAVE_PLOT = True
+except ImportError:
+    HAVE_PLOT = False
+    print("NOTE: matplotlib is not installed, so the pictures will be skipped.")
+    print("      Install it with:  python -m pip install matplotlib   (numbers are still produced)")
+
+n_all, n_train = len(df), len(train_df)
+print("The 5 folds are cut from the training set only. The test set is not involved.")
+print("In each round one fold is held out for validation; the other four are used for training.\n")
+print(f"    {'round':<7}{'validation rows':>16}{'% of ALL data':>15}{'training rows':>15}{'% of ALL data':>15}"
+      f"{'val positives':>15}{'val pos. rate':>15}")
+folds = []
+for k, (tr_idx, va_idx) in enumerate(cv.split(X_train, y_train, groups_train), start=1):
+    shared = set(groups_train.iloc[tr_idx]) & set(groups_train.iloc[va_idx])
+    assert len(shared) == 0, f"round {k}: {len(shared)} patients in both training and validation"
+    n_va, n_tr = len(va_idx), len(tr_idx)
+    pos_va = int(y_train.iloc[va_idx].sum())
+    folds.append({"val_pct_all": n_va / n_all * 100, "train_pct_all": n_tr / n_all * 100})
+    print(f"    {k:<7}{n_va:>16,}{n_va / n_all * 100:>14.1f}%{n_tr:>15,}{n_tr / n_all * 100:>14.1f}%"
+          f"{pos_va:>15,}{pos_va / n_va * 100:>14.2f}%")
+avg_val = float(np.mean([f["val_pct_all"] for f in folds]))
+avg_tr = float(np.mean([f["train_pct_all"] for f in folds]))
+test_pct = len(test_df) / n_all * 100
+print(f"\n    On average, each round validates on {avg_val:.1f}% of ALL the data and trains on {avg_tr:.1f}%.")
+print(f"    The remaining {test_pct:.1f}% (the test set) is not touched.")
+print("    check: no patient appears in both the training and validation part of any round")
+
+if HAVE_PLOT:
+    fig, ax = plt.subplots(figsize=(11, 4.6))
+    for row in range(5):
+        left = 0.0
+        for j, f in enumerate(folds):
+            is_val = (j == row)
+            ax.barh(row, f["val_pct_all"], left=left, edgecolor="white",
+                    color="#d9534f" if is_val else "#8fb8de")
+            if is_val:
+                ax.text(left + f["val_pct_all"] / 2, row, f"validation\n{f['val_pct_all']:.1f}%",
+                        ha="center", va="center", color="white", fontsize=8, fontweight="bold")
+            left += f["val_pct_all"]
+        ax.barh(row, test_pct, left=left, color="#cfcfcf", edgecolor="white")
+        ax.text(left + test_pct / 2, row, f"test set\n{test_pct:.1f}%", ha="center", va="center",
+                color="#555555", fontsize=8)
+    ax.set_yticks(range(5)); ax.set_yticklabels([f"Round {k}" for k in range(1, 6)])
+    ax.invert_yaxis(); ax.set_xlim(0, 100)
+    ax.set_xlabel("Share of ALL the data (%)")
+    ax.set_title("5-fold cross-validation on the training set\n"
+                 f"each round: {avg_val:.1f}% of all data validates, {avg_tr:.1f}% trains; "
+                 f"the {test_pct:.1f}% test set is never used")
+    from matplotlib.patches import Patch
+    ax.legend(handles=[Patch(color="#d9534f", label="validation fold (held out)"),
+                       Patch(color="#8fb8de", label="training folds"),
+                       Patch(color="#cfcfcf", label="test set (not used in tuning)")],
+              loc="upper center", bbox_to_anchor=(0.5, -0.16), ncol=3, frameon=False)
+    plt.tight_layout()
+    plt.savefig(os.path.join(HERE, "cv_folds_structure_phase5.png"), dpi=200)
+    plt.close()
+    print("\nSaved: cv_folds_structure_phase5.png")
+else:
+    print("\nSkipped the picture (matplotlib not installed).")
+
+
+# ===========================================================================
+# STEP 7: F1 SCORE ON EACH VALIDATION FOLD
+# WHY: the averages in Step 5 hide how the score moves from fold to fold. This
+# shows how stable each model is, and that the chosen setting is not just one
+# lucky fold. The scores were recorded during the tuning above (no extra fits).
+# ===========================================================================
+header("STEP 7: F1 SCORE ON EACH VALIDATION FOLD")
+
+fold_df = pd.DataFrame(fold_rows)
+fold_df.to_csv(os.path.join(HERE, "cv_fold_scores_phase5.csv"), index=False)
+
+for name in models:
+    sub_df = fold_df[fold_df["model"] == name]
+    print(f"\n{name}  (chosen: {chosen_labels[name]})")
+    print(f"    {'settings':<34}" + "".join(f"{'fold ' + str(i):>9}" for i in range(1, 6)) + f"{'mean':>9}")
+    for label, g in sub_df.groupby("settings", sort=False):
+        mark = "  <- chosen" if label == chosen_labels[name] else ""
+        print(f"    {label:<34}" + "".join(f"{v:>9.3f}" for v in g["f1"]) + f"{g['f1'].mean():>9.3f}{mark}")
+
+# check: the fold scores must average to the Phase 5 means (same numbers, seen per fold)
+check_ok = True
+for row in all_cv_rows:
+    g = fold_df[(fold_df["model"] == row["model"]) & (fold_df["settings"] == row["settings"])]
+    if not np.isclose(g["f1"].mean(), row["mean_f1"]):
+        check_ok = False
+print(f"\ncheck: the 5 fold scores of every setting average to its Phase 5 mean F1: {'yes' if check_ok else 'NO'}")
+print("Saved: cv_fold_scores_phase5.csv (every setting on every fold)")
+
+if HAVE_PLOT:
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4.4), sharey=True)
+    for ax, name in zip(axes, models):
+        for label, g in fold_df[fold_df["model"] == name].groupby("settings", sort=False):
+            chosen = (label == chosen_labels[name])
+            ax.plot(g["fold"], g["f1"], marker="o", linewidth=2.8 if chosen else 1.4,
+                    linestyle="-" if chosen else "--",
+                    label=label + ("  (chosen)" if chosen else ""))
+            if chosen:
+                ax.axhline(g["f1"].mean(), color="grey", linewidth=1, alpha=0.6)
+        ax.set_title(name); ax.set_xlabel("Validation fold"); ax.set_xticks(range(1, 6))
+        ax.grid(alpha=0.3)
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.2), fontsize=8, frameon=False)
+    axes[0].set_ylabel("F1 on the validation fold")
+    fig.suptitle("F1 on each of the 5 validation folds (grey line = mean of the chosen setting)")
+    plt.tight_layout()
+    plt.savefig(os.path.join(HERE, "cv_f1_by_fold_phase5.png"), dpi=200)
+    plt.close()
+    print("Saved: cv_f1_by_fold_phase5.png")
+else:
+    print("Skipped the picture (matplotlib not installed).")
+
+
+header("DONE: phases 4-5 complete")

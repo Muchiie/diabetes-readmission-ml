@@ -10,7 +10,6 @@ HOW TO RUN
   Outputs (created next to this file):
        diabetic_cleaned.csv   - result of Phase 2
        diabetic_features.csv  - result of Phase 3 (target + 40 features, ready to split)
-       clean_log.txt          - everything printed, kept as proof for the report
 
 SECTIONS
   PHASE 1: Load and inspect the raw data
@@ -19,30 +18,9 @@ SECTIONS
 """
 import os
 import sys
-import numpy as np
 import pandas as pd
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-
-
-# ---------------------------------------------------------------------------
-# Logging: everything printed also goes to clean_log.txt (traceability)
-# ---------------------------------------------------------------------------
-class Tee:
-    def __init__(self, *streams):
-        self.streams = streams
-
-    def write(self, text):
-        for s in self.streams:
-            s.write(text)
-
-    def flush(self):
-        for s in self.streams:
-            s.flush()
-
-
-log_file = open(os.path.join(HERE, "clean_log.txt"), "w", encoding="utf-8")
-sys.stdout = Tee(sys.__stdout__, log_file)
 
 
 def header(title):
@@ -289,6 +267,4 @@ FEATURES_PATH = os.path.join(HERE, "diabetic_features.csv")
 df.to_csv(FEATURES_PATH, index=False)
 print(f"Saved: {FEATURES_PATH}")
 
-header("DONE: phases 1-3 complete. Next: run train_and_tuning.py. Log saved to clean_log.txt")
-sys.stdout = sys.__stdout__  # stop copying to the log before closing it
-log_file.close()
+header("DONE: phases 1-3 complete. Next: run train_and_tuning.py")
